@@ -105,16 +105,65 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 
+const frontendUrl = process.env.DOMAIN;
+console.log("Frontend URL:", frontendUrl);
 // Middlewares
 app.use(express.json({ limit: '16kb' }));
 app.use(express.urlencoded({ extended: true, limit: "16kb" }));
 app.use(cookieParser());
 
+app.use(cors({
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl)
+        if (!origin) return callback(null, true);
+
+        const allowedOrigins = [
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "https://fedkiit.com",
+            "https://www.fedkiit.com"
+        ];
+
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(null, true); // Allow all in dev, restrict in production
+        }
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    credentials: true,
+}));
+app.options('*', cors()); // handle preflight requests
+
+// const allowedOrigins = [
+//   "https://fedkiit.com",
+//   "https://www.fedkiit.com",
+//   "http://localhost:5173" // optional for local dev
+// ];
+
+// app.use(cors({
+//   origin: function (origin, callback) {
+//     if (!origin || allowedOrigins.includes(origin)) {
+//       callback(null, true);
+//     } else {
+//       callback(new Error("Not allowed by CORS"));
+//     }
+//   },
+//   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+//   credentials: true,
+// }));
+
+
+
+
+
+
+
 // app.use(cors({
 //   origin: /^https:\/\/.*\.fedkiit\.com$/
 // }));
 // app.options('*', cors()); 
-app.use(cors("*"))
+// app.use(cors("*"))
 // app.use(cors({
 //     origin: '*',
 //     credentials: true,
@@ -168,11 +217,11 @@ app.use(jsonParseErrorHandler);
 // Error-handling middleware - should be at the end
 app.use(errorHandler);
 
-app.use('/keep-alive',(req,res) => {
+app.use('/keep-alive', (req, res) => {
     res.sendStatus(200);
     // res.status(200).json({message : "Alive"});
 })
-app.use('/',(req,res) => {
+app.use('/', (req, res) => {
     res.sendStatus(404);
 })
 // Start server

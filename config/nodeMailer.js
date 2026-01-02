@@ -1,12 +1,45 @@
-//config for nodeMailer
-const nodemailer = require('nodemailer');
+// config/nodeMailer.js
+const nodemailer = require("nodemailer");
 
-const mailTransporter = nodemailer.createTransport({
-    service: 'gmail',
+// Primary transporter (e.g., Gmail)
+const mailTransporterPrimary = nodemailer.createTransport({
+    service: "gmail",
     auth: {
         user: process.env.MAIL_USER,
-        pass: process.env.MAIL_PASS
-    }
+        pass: process.env.MAIL_PASS,
+    },
 });
 
-module.exports = mailTransporter;
+
+const mailTransporterSecondary = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+        user: process.env.MAIL_USER_SECONDARY,
+        pass: process.env.MAIL_PASS_SECONDARY,
+    },
+});
+
+const mailTransporterTertiary = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+        user: process.env.MAIL_USER_TERTIARY,
+        pass: process.env.MAIL_PASS_TERTIARY,
+    },
+});
+
+const mailTransporterMailerSend = nodemailer.createTransport({
+    host: "smtp.mailersend.net",
+    port: 587,
+    secure: false,
+    auth: {
+        user: process.env.MAIL_USER_MAILERSEND,
+        pass: process.env.MAIL_PASS_MAILERSEND,
+    },
+});
+
+module.exports = {
+    primary: mailTransporterPrimary,
+    secondary: mailTransporterSecondary,
+    tertiary: mailTransporterTertiary,
+    mailerSend: mailTransporterMailerSend,
+};
