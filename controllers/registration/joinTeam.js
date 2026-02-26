@@ -121,7 +121,7 @@ const joinTeam = expressAsyncHandler(async (req, res, next) => {
             data: {
                 teamName: targetTeam.teamName,
                 teamCode: targetTeam.teamCode,
-                eventId: info.relatedEvent || formId
+                eventId: (info.relatedEvent && info.relatedEvent !== "null") ? info.relatedEvent : formId
             }
         });
 

@@ -14,8 +14,8 @@ const respondJoinRequest = async (req, res) => {
     const frontendUrl = frontendBase.endsWith('/') ? frontendBase.slice(0, -1) : frontendBase;
 
     // Helper to redirect to team page with toast
-    const redirectToTeam = (eventId, formId, toastType, name) => {
-        let url = `${frontendUrl}/Events/${eventId}/team/${formId}`;
+    const redirectToTeam = (formId, toastType, name) => {
+        let url = `${frontendUrl}/Events/${formId}/team`;
         const params = [];
         if (toastType) params.push(`toast=${toastType}`);
         if (name) params.push(`name=${encodeURIComponent(name)}`);
@@ -48,8 +48,7 @@ const respondJoinRequest = async (req, res) => {
                         where: { id: payload.formId },
                         select: { info: true }
                     });
-                    const eventId = form?.info?.relatedEvent || payload.formId;
-                    return redirectToTeam(eventId, payload.formId, "expired");
+                    return redirectToTeam(payload.formId, "expired");
                 }
                 return redirectError("This request has expired.");
             }
@@ -73,8 +72,6 @@ const respondJoinRequest = async (req, res) => {
             select: { info: true }
         });
 
-        const eventId = form?.info?.relatedEvent || formId;
-
         // Check if request is still PENDING
         if (joinRequest.status !== "PENDING") {
             const statusToasts = {
@@ -83,7 +80,7 @@ const respondJoinRequest = async (req, res) => {
                 "AUTO_EXPIRED": "already_joined",
                 "EXPIRED": "expired"
             };
-            return redirectToTeam(eventId, formId, statusToasts[joinRequest.status] || "invalid", joinRequest.requesterName);
+            return redirectToTeam(formId, statusToasts[joinRequest.status] || "invalid", joinRequest.requesterName);
         }
 
         // Check if request has passed its expiry time (even if JWT is valid)
@@ -92,7 +89,7 @@ const respondJoinRequest = async (req, res) => {
                 where: { id: requestId },
                 data: { status: "EXPIRED", respondedAt: new Date() }
             });
-            return redirectToTeam(eventId, formId, "expired");
+            return redirectToTeam(formId, "expired");
         }
 
         // === REJECT ===
@@ -132,7 +129,7 @@ const respondJoinRequest = async (req, res) => {
                 // Non-critical — continue with redirect
             }
 
-            return redirectToTeam(eventId, formId, "rejected", joinRequest.requesterName);
+            return redirectToTeam(formId, "rejected", joinRequest.requesterName);
         }
 
         // === ACCEPT ===
@@ -150,7 +147,7 @@ const respondJoinRequest = async (req, res) => {
                 where: { id: requestId },
                 data: { status: "AUTO_EXPIRED", respondedAt: new Date() }
             });
-            return redirectToTeam(eventId, formId, "already_joined", joinRequest.requesterName);
+            return redirectToTeam(formId, "already_joined", joinRequest.requesterName);
         }
 
         // Check the target team still exists and is not full
@@ -162,7 +159,7 @@ const respondJoinRequest = async (req, res) => {
         });
 
         if (!targetTeam) {
-            return redirectToTeam(eventId, formId, "invalid");
+            return redirectToTeam(formId, "invalid");
         }
 
         const maxSize = parseInt(targetTeam.form.info.maxTeamSize) || 1;
@@ -171,7 +168,7 @@ const respondJoinRequest = async (req, res) => {
                 where: { id: requestId },
                 data: { status: "AUTO_EXPIRED", respondedAt: new Date() }
             });
-            return redirectToTeam(eventId, formId, "team_full", joinRequest.requesterName);
+            return redirectToTeam(formId, "team_full", joinRequest.requesterName);
         }
 
         // Get user's value[] entry from their solo record
@@ -236,7 +233,7 @@ const respondJoinRequest = async (req, res) => {
             // Non-critical — continue with redirect
         }
 
-        return redirectToTeam(eventId, formId, "joined", joinRequest.requesterName);
+        return redirectToTeam(formId, "joined", joinRequest.requesterName);
 
     } catch (error) {
         console.error("Error in respondJoinRequest:", error);
