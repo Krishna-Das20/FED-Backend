@@ -36,6 +36,7 @@ router.post("/leaveTeam", checkAccess("USER"), registrationController.leaveTeam)
 router.post("/inviteTeamMember", checkAccess("USER"), registrationController.inviteTeamMember);
 router.get("/inviteLink/:formId", checkAccess("USER"), registrationController.getTeamInviteLink);
 router.patch("/renameTeam", checkAccess("USER"), registrationController.renameTeam);
+router.post("/removeTeamMember", checkAccess("USER"), registrationController.removeTeamMember);
 // [v2] New team management routes
 router.post("/createTeam", checkAccess("USER"), registrationController.createTeam);
 router.post("/joinTeam", checkAccess("USER"), registrationController.joinTeam);

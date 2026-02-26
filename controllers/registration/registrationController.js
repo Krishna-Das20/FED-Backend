@@ -10,6 +10,7 @@ const { leaveTeam } = require("./leaveTeam");
 const { inviteTeamMember } = require("./inviteTeamMember");
 const { getTeamInviteLink } = require("./getTeamInviteLink");
 const { renameTeam } = require("./renameTeam");
+const { removeTeamMember } = require("./removeTeamMember");
 // [v2] New team management controllers
 const { createTeam } = require("./createTeam");
 const { searchTeams } = require("./searchTeams");
@@ -30,6 +31,7 @@ module.exports = {
   inviteTeamMember,
   getTeamInviteLink,
   renameTeam,
+  removeTeamMember,
   // [v2] New team management exports
   createTeam,
   searchTeams,
