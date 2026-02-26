@@ -2,6 +2,8 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 const { ApiError } = require("../../utils/error/ApiError");
 const expressAsyncHandler = require("express-async-handler");
+const { sendMail } = require("../../utils/email/nodeMailer");
+const loadTemplate = require("../../utils/email/loadTemplate");
 
 //@description     Remove a team member (Leader only)
 //@route           POST /api/form/removeTeamMember
@@ -15,6 +17,9 @@ const removeTeamMember = expressAsyncHandler(async (req, res, next) => {
         if (!formId || !memberEmail) {
             return next(new ApiError(400, "Form ID and member email are required"));
         }
+
+        // Normalize email
+        const normalizedEmail = memberEmail.trim().toLowerCase();
 
         // Find the team registration where the requesting user is the LEADER
         const teamRegistration = await prisma.formRegistration.findFirst({
@@ -102,9 +107,21 @@ const removeTeamMember = expressAsyncHandler(async (req, res, next) => {
             // Tracker stays the same — user is still registered, no count changes
         });
 
+        // Send invitation email
+        const htmlContent = loadTemplate("removedMember", {
+            eventName: info.eventTitle || "Event",
+            teamName: teamRegistration.teamName
+        });
+
+        await sendMail(
+            normalizedEmail,
+            `You're removed from "${teamRegistration.teamName}" from ${info.eventTitle || "an event"}`,
+            htmlContent
+        );
+
         res.status(200).json({
             success: true,
-            message: `Successfully removed ${memberEmail} from the team.`
+            message: `Successfully removed ${memberEmail} from the team & informed through ${normalizedEmail}`
         });
 
     } catch (error) {
