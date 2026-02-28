@@ -72,6 +72,19 @@ const sendJoinRequest = expressAsyncHandler(async (req, res, next) => {
             return next(new ApiError(400, `Team is full (${targetTeam.teamSize}/${maxSize} members).`));
         }
 
+        // Limit: max 3 pending requests at a time per user per event
+        const pendingCount = await prisma.teamJoinRequest.count({
+            where: {
+                formId,
+                requesterEmail: email,
+                status: "PENDING"
+            }
+        });
+
+        if (pendingCount >= 3) {
+            return next(new ApiError(400, "You already have 3 pending requests. Wait for a response before sending more."));
+        }
+
         // Check no existing PENDING request from this user to this team
         const existingRequest = await prisma.teamJoinRequest.findFirst({
             where: {
