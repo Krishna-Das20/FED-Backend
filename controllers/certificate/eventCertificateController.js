@@ -1369,7 +1369,6 @@ const sendCertViaEmail = async (req, res) => {
       return res.status(400).json({ error: "Invalid request data" });
     }
 
-    // Fetch existing issued certificates to prevent duplicates
     const existingCertificates = await prisma.issuedCertificates.findMany({
       where: {
         eventId,
@@ -1385,13 +1384,14 @@ const sendCertViaEmail = async (req, res) => {
       (attendee) => !existingEmails.has(attendee.fieldValues.email)
     );
 
-    if (newCertificates.length === 0) {
+    // Include existing certificates that haven't been mailed yet
+    let certificatesToMail = existingCertificates.filter((cert) => !cert.mailed);
+
+    if (newCertificates.length === 0 && certificatesToMail.length === 0) {
       return res
         .status(200)
-        .json({ message: "All certificates already issued" });
+        .json({ message: "All certificates already issued and mailed" });
     }
-
-    let certificatesToMail = [];
 
     for (const attendee of newCertificates) {
       const { fieldValues, certificateId } = attendee;
@@ -1411,6 +1411,7 @@ const sendCertViaEmail = async (req, res) => {
     }
 
     // Proceed with sending certificates via email
+    let failedMails = [];
     for (const cert of certificatesToMail) {
       try {
         let attachments = [];
@@ -1510,7 +1511,15 @@ const sendCertViaEmail = async (req, res) => {
         // await sleep(60000);
       } catch (error) {
         console.error(`Failed to send mail to ${cert.email}:`, error);
+        failedMails.push({ email: cert.email, error: error.message });
       }
+    }
+
+    if (failedMails.length > 0) {
+      return res.status(207).json({
+        message: `${certificatesToMail.length - failedMails.length} emails sent successfully. ${failedMails.length} failed.`,
+        failed: failedMails,
+      });
     }
 
     res.status(200).json({
