@@ -7,6 +7,7 @@ const QRCode = require("qrcode");
 const { loadImage, createCanvas } = require("canvas");
 const { count } = require("console");
 const { sendMail } = require("../../utils/email/nodeMailer");
+const { ApiError } = require("../../utils/error/ApiError");
 
 const createEvent = async (req, res) => {
   try {
@@ -50,7 +51,7 @@ function convertToJSON(value) {
   return value;
 }
 
-const addCertificateTemplate = async (req, res) => {
+const addCertificateTemplate = async (req, res, next) => {
   try {
     const { eventId } = req.body;
 
@@ -666,32 +667,45 @@ const addAttendee = async (req, res) => {
         .json({ error: "Event ID and attendees are required" });
     }
 
-    const addedAttendees = [];
+    const event = await prisma.event.findUnique({
+      where: { id: eventId },
+    });
 
-    for (const attendee of attendees) {
-      const existingAttendee = await prisma.attendee.findFirst({
-        where: { eventId, email: attendee.email }, // Ensure we check by email and eventId
-      });
+    if (!event) {
+      return res.status(404).json({ error: "Event not found" });
+    }
 
-      if (existingAttendee) {
-        // Update existing attendee instead of inserting a new one
-        const updatedAttendee = await prisma.attendee.update({
-          where: { id: existingAttendee.id },
-          data: { ...attendee, updatedAt: new Date() }, // Update necessary fields
-        });
-        addedAttendees.push(updatedAttendee);
+    const currentAttendees = event.attendees || [];
+    const updatedAttendeesList = [...currentAttendees];
+
+    for (const newAttendee of attendees) {
+      const existingIdx = updatedAttendeesList.findIndex(
+        (att) => att.email === newAttendee.email
+      );
+
+      if (existingIdx > -1) {
+        updatedAttendeesList[existingIdx] = {
+          ...updatedAttendeesList[existingIdx],
+          ...newAttendee,
+          updatedAt: new Date(),
+        };
       } else {
-        // Insert new attendee if not found
-        const newAttendee = await prisma.attendee.create({
-          data: { ...attendee, eventId },
+        updatedAttendeesList.push({
+          ...newAttendee,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         });
-        addedAttendees.push(newAttendee);
       }
     }
 
+    const updatedEvent = await prisma.event.update({
+      where: { id: eventId },
+      data: { attendees: updatedAttendeesList },
+    });
+
     return res.status(200).json({
       message: "Attendees added/updated successfully",
-      data: addedAttendees,
+      data: updatedEvent.attendees,
     });
   } catch (error) {
     console.error("Error in addAttendee:", error);
@@ -971,12 +985,6 @@ const sendBatchMails = async (req, res) => {
   try {
     const { batchSize, eventId, subject, htmlContent } = req.body;
 
-    // Fetch the event and issued certificates
-    // const event = await prisma.event.findFirst({
-    //   where: { formId },
-    //   include: { issuedCertificates: true },
-    // });
-
     const event = await prisma.event.findUnique({
       where: { id: eventId },
     });
@@ -995,14 +1003,21 @@ const sendBatchMails = async (req, res) => {
       return res.status(200).json({ message: "No pending emails to send" });
     }
 
+    // --- Optimization: Fetch certificates and cache images ---
+    const certIds = [...new Set(certificatesToMail.map((c) => c.certificateId).filter(Boolean))];
+    const certificates = await prisma.certificate.findMany({
+      where: { id: { in: certIds } },
+    });
+    const certificateMap = new Map(certificates.map((c) => [c.id, c]));
+    const templateImageCache = new Map();
+    // ---------------------------------------------------------
+
     for (const cert of certificatesToMail) {
       try {
         let attachments = [];
 
-        // Fetch the certificate template
-        const certificate = await prisma.certificate.findUnique({
-          where: { id: cert.certificateId },
-        });
+        // Fetch the certificate template from map instead of DB
+        const certificate = certificateMap.get(cert.certificateId);
 
         if (!certificate || !certificate.template) {
           console.error(`Certificate template not found for ${cert.email}`);
@@ -1012,8 +1027,12 @@ const sendBatchMails = async (req, res) => {
         const { template, fields } = certificate;
         const fieldValues = cert.fieldValues;
 
-        // Load the template image
-        const templateImage = await loadImage(template);
+        // Load the template image using cache to avoid duplicate decodes
+        let templateImage = templateImageCache.get(template);
+        if (!templateImage) {
+          templateImage = await loadImage(template);
+          templateImageCache.set(template, templateImage);
+        }
         const { width, height } = templateImage;
 
         // Create a canvas and draw the template image
@@ -1410,15 +1429,23 @@ const sendCertViaEmail = async (req, res) => {
       certificatesToMail.push(issuedCert);
     }
 
+    // --- Optimization: Fetch certificates and cache images ---
+    const certIds = [...new Set(certificatesToMail.map((c) => c.certificateId).filter(Boolean))];
+    const certificates = await prisma.certificate.findMany({
+      where: { id: { in: certIds } },
+    });
+    const certificateMap = new Map(certificates.map((c) => [c.id, c]));
+    const templateImageCache = new Map();
+    // ---------------------------------------------------------
+
     // Proceed with sending certificates via email
     let failedMails = [];
     for (const cert of certificatesToMail) {
       try {
         let attachments = [];
 
-        const certificate = await prisma.certificate.findUnique({
-          where: { id: cert.certificateId },
-        });
+        // Fetch the certificate template from map instead of DB
+        const certificate = certificateMap.get(cert.certificateId);
 
         if (!certificate || !certificate.template) {
           console.error(`Certificate template missing for ${cert.email}`);
@@ -1428,7 +1455,12 @@ const sendCertViaEmail = async (req, res) => {
         const { template, fields } = certificate;
         const fieldValues = cert.fieldValues;
 
-        const templateImage = await loadImage(template);
+        // Image caching to avoid duplicate decodes
+        let templateImage = templateImageCache.get(template);
+        if (!templateImage) {
+          templateImage = await loadImage(template);
+          templateImageCache.set(template, templateImage);
+        }
         const { width, height } = templateImage;
 
         const canvas = createCanvas(width, height);
