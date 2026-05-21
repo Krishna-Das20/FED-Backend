@@ -1012,16 +1012,31 @@ const sendBatchMails = async (req, res) => {
     const templateImageCache = new Map();
     // ---------------------------------------------------------
 
+    const successfulMailIds = [];
+    const failedMails = [];
+    const totalCerts = certificatesToMail.length;
+    let counter = 0;
+
+    // Instantiate canvas once outside the loop — reuse context per certificate
+    let sharedCanvas = null;
+    let sharedContext = null;
+
+    console.log(`[sendBatchMails] Starting processing of ${totalCerts} pending certificates...`);
+
     for (const cert of certificatesToMail) {
+      counter++;
+      const logPrefix = `[sendBatchMails] [Cert ${counter}/${totalCerts}] [Email: ${cert.email}]`;
+
       try {
-        let attachments = [];
+        console.log(`${logPrefix} Fetching template...`);
 
         // Fetch the certificate template from map instead of DB
         const certificate = certificateMap.get(cert.certificateId);
 
         if (!certificate || !certificate.template) {
-          console.error(`Certificate template not found for ${cert.email}`);
-          continue; // Skip this email if template is missing
+          console.error(`${logPrefix} Certificate template not found (ID: ${cert.certificateId})`);
+          failedMails.push({ email: cert.email, error: "Certificate template not found" });
+          continue;
         }
 
         const { template, fields } = certificate;
@@ -1030,19 +1045,32 @@ const sendBatchMails = async (req, res) => {
         // Load the template image using cache to avoid duplicate decodes
         let templateImage = templateImageCache.get(template);
         if (!templateImage) {
+          console.log(`${logPrefix} Cache miss. Loading template image from URL...`);
           templateImage = await loadImage(template);
           templateImageCache.set(template, templateImage);
+        } else {
+          console.log(`${logPrefix} Cache hit. Reusing decoded template image.`);
         }
         const { width, height } = templateImage;
 
-        // Create a canvas and draw the template image
-        const canvas = createCanvas(width, height);
-        const context = canvas.getContext("2d");
-        context.drawImage(templateImage, 0, 0, width, height);
+        // Reuse canvas/context across iterations — only recreate if dimensions change
+        if (!sharedCanvas || sharedCanvas.width !== width || sharedCanvas.height !== height) {
+          console.log(`${logPrefix} Allocating new canvas (${width}x${height})...`);
+          sharedCanvas = createCanvas(width, height);
+          sharedContext = sharedCanvas.getContext("2d");
+        } else {
+          // Clear canvas for reuse
+          sharedContext.clearRect(0, 0, width, height);
+        }
+
+        // Draw the template image
+        console.log(`${logPrefix} Drawing background...`);
+        sharedContext.drawImage(templateImage, 0, 0, width, height);
 
         let qrX, qrY;
 
-        // Iterate over fields and populate text
+        // Inject field values onto canvas
+        console.log(`${logPrefix} Injecting fields on canvas...`);
         for (const field of fields) {
           const {
             fieldName,
@@ -1052,7 +1080,6 @@ const sendBatchMails = async (req, res) => {
             fontSize = 40,
             fontColor = "#000000",
           } = field;
-          const value = fieldValues[fieldName];
 
           if (fieldName === "qr") {
             qrX = x;
@@ -1060,29 +1087,29 @@ const sendBatchMails = async (req, res) => {
             continue;
           }
 
+          const value = fieldValues[fieldName];
           if (!value) {
-            console.warn(`Missing value for field: ${fieldName}`);
+            console.warn(`${logPrefix} Missing value for field: ${fieldName}`);
             continue;
           }
 
-          context.font = `${fontSize}px ${font}`;
-          context.fillStyle = fontColor;
-          context.textAlign = "center";
-          context.fillText(value, (x / 100) * width, (y / 100) * height);
+          sharedContext.font = `${fontSize}px ${font}`;
+          sharedContext.fillStyle = fontColor;
+          sharedContext.textAlign = "center";
+          sharedContext.fillText(value, (x / 100) * width, (y / 100) * height);
         }
 
-        // Generate a QR code containing the certificate link
+        // Generate QR code buffer
+        console.log(`${logPrefix} Generating QR Code buffer...`);
         const qrCodeData = `${
           process.env.DOMAIN || "testDomain/"
         }verify/certificate?id=${cert.id}`;
-        const qrCodeBuffer = await QRCode.toBuffer(qrCodeData, {
-          width: 150,
-          margin: 1,
-        });
+        const qrCodeBuffer = await QRCode.toBuffer(qrCodeData, { width: 150, margin: 1 });
 
-        // Draw the QR code on the canvas
+        // Draw QR code on canvas
+        console.log(`${logPrefix} Drawing QR Code on canvas...`);
         const qrCodeImage = await loadImage(qrCodeBuffer);
-        context.drawImage(
+        sharedContext.drawImage(
           qrCodeImage,
           qrX || width - 170,
           qrY || height - 170,
@@ -1090,10 +1117,9 @@ const sendBatchMails = async (req, res) => {
           150
         );
 
-        // Convert canvas to image buffer
-        const buffer = canvas.toBuffer("image/png");
+        const buffer = sharedCanvas.toBuffer("image/png");
 
-        attachments = [
+        const attachments = [
           {
             filename: `certificate-${cert.email}.png`,
             content: buffer,
@@ -1101,7 +1127,8 @@ const sendBatchMails = async (req, res) => {
           },
         ];
 
-        // Send email with the certificate as an attachment
+        // Dispatch email
+        console.log(`${logPrefix} Dispatching email via SMTP...`);
         await sendMail(
           cert.email,
           subject,
@@ -1110,20 +1137,34 @@ const sendBatchMails = async (req, res) => {
           attachments
         );
 
-        // Update DB: Mark as mailed
-        await prisma.issuedCertificates.update({
-          where: { id: cert.id },
-          data: { mailed: true },
-        });
-
-        console.log(`Mail sent to ${cert.email}`);
+        successfulMailIds.push(cert.id);
+        console.log(`${logPrefix} Email dispatched successfully.`);
       } catch (error) {
-        console.error(`Failed to send mail to ${cert.email}:`, error);
+        console.error(`${logPrefix} FAILED to process or send:`, error.message);
+        failedMails.push({ email: cert.email, error: error.message });
       }
     }
 
+    // Single bulk DB update for all successful mails — no N+1 writes
+    if (successfulMailIds.length > 0) {
+      console.log(`[sendBatchMails] Bulk update: marking ${successfulMailIds.length} records as mailed=true...`);
+      await prisma.issuedCertificates.updateMany({
+        where: { id: { in: successfulMailIds } },
+        data: { mailed: true },
+      });
+      console.log("[sendBatchMails] Bulk update completed.");
+    }
+
+    if (failedMails.length > 0) {
+      console.error(`[sendBatchMails] ${failedMails.length} emails failed:`, failedMails);
+      return res.status(207).json({
+        message: `${successfulMailIds.length} of ${totalCerts} emails sent successfully. ${failedMails.length} failed.`,
+        failed: failedMails,
+      });
+    }
+
     res.status(200).json({
-      message: `${certificatesToMail.length} emails sent successfully`,
+      message: `${successfulMailIds.length} of ${totalCerts} emails sent successfully`,
     });
   } catch (error) {
     console.error("Error in sendBatchMails:", error);
@@ -1412,63 +1453,94 @@ const sendCertViaEmail = async (req, res) => {
         .json({ message: "All certificates already issued and mailed" });
     }
 
-    for (const attendee of newCertificates) {
-      const { fieldValues, certificateId } = attendee;
-
-      // Save certificate in DB
-      const issuedCert = await prisma.issuedCertificates.create({
-        data: {
+    // Batch insert new certificates — no N+1 individual creates
+    if (newCertificates.length > 0) {
+      console.log(`[sendCertViaEmail] Batch inserting ${newCertificates.length} new certificate records...`);
+      await prisma.issuedCertificates.createMany({
+        data: newCertificates.map(({ fieldValues, certificateId }) => ({
           eventId,
           email: fieldValues.email,
           fieldValues,
           certificateId,
           mailed: false,
-        },
+        })),
+        skipDuplicates: true,
       });
+      console.log("[sendCertViaEmail] Batch insert completed.");
 
-      certificatesToMail.push(issuedCert);
+      // Retrieve newly inserted records by email to get their generated IDs
+      const newEmails = newCertificates.map((a) => a.fieldValues.email);
+      const insertedCerts = await prisma.issuedCertificates.findMany({
+        where: { eventId, email: { in: newEmails }, mailed: false },
+      });
+      certificatesToMail.push(...insertedCerts);
     }
 
-    // --- Optimization: Fetch certificates and cache images ---
+    // --- Batch-fetch certificate templates to avoid N+1 reads ---
     const certIds = [...new Set(certificatesToMail.map((c) => c.certificateId).filter(Boolean))];
     const certificates = await prisma.certificate.findMany({
       where: { id: { in: certIds } },
     });
     const certificateMap = new Map(certificates.map((c) => [c.id, c]));
     const templateImageCache = new Map();
-    // ---------------------------------------------------------
+    // ------------------------------------------------------------
 
-    // Proceed with sending certificates via email
-    let failedMails = [];
+    const failedMails = [];
+    const successfulMailIds = [];
+    const totalCerts = certificatesToMail.length;
+    let counter = 0;
+
+    // Instantiate canvas once outside the loop — reuse context per certificate
+    let sharedCanvas = null;
+    let sharedContext = null;
+
+    console.log(`[sendCertViaEmail] Starting processing of ${totalCerts} certificates...`);
+
     for (const cert of certificatesToMail) {
+      counter++;
+      const logPrefix = `[sendCertViaEmail] [Cert ${counter}/${totalCerts}] [Email: ${cert.email}]`;
+
       try {
-        let attachments = [];
+        console.log(`${logPrefix} Fetching template...`);
 
-        // Fetch the certificate template from map instead of DB
         const certificate = certificateMap.get(cert.certificateId);
-
         if (!certificate || !certificate.template) {
-          console.error(`Certificate template missing for ${cert.email}`);
+          console.error(`${logPrefix} Certificate template missing (ID: ${cert.certificateId})`);
+          failedMails.push({ email: cert.email, error: "Certificate template not found" });
           continue;
         }
 
         const { template, fields } = certificate;
         const fieldValues = cert.fieldValues;
 
-        // Image caching to avoid duplicate decodes
+        // Load template image — use cache to avoid duplicate network decodes
         let templateImage = templateImageCache.get(template);
         if (!templateImage) {
+          console.log(`${logPrefix} Cache miss. Loading template image from URL...`);
           templateImage = await loadImage(template);
           templateImageCache.set(template, templateImage);
+        } else {
+          console.log(`${logPrefix} Cache hit. Reusing decoded template image.`);
         }
         const { width, height } = templateImage;
 
-        const canvas = createCanvas(width, height);
-        const context = canvas.getContext("2d");
-        context.drawImage(templateImage, 0, 0, width, height);
+        // Reuse canvas/context across iterations — only recreate if dimensions change
+        if (!sharedCanvas || sharedCanvas.width !== width || sharedCanvas.height !== height) {
+          console.log(`${logPrefix} Allocating new canvas (${width}x${height})...`);
+          sharedCanvas = createCanvas(width, height);
+          sharedContext = sharedCanvas.getContext("2d");
+        } else {
+          sharedContext.clearRect(0, 0, width, height);
+        }
+
+        // Draw template background
+        console.log(`${logPrefix} Drawing background...`);
+        sharedContext.drawImage(templateImage, 0, 0, width, height);
 
         let qrX, qrY;
 
+        // Inject field values onto canvas
+        console.log(`${logPrefix} Injecting fields on canvas...`);
         for (const field of fields) {
           const {
             fieldName,
@@ -1478,7 +1550,6 @@ const sendCertViaEmail = async (req, res) => {
             fontSize = 40,
             fontColor = "#000000",
           } = field;
-          const value = fieldValues[fieldName];
 
           if (fieldName === "qr") {
             qrX = x;
@@ -1486,27 +1557,29 @@ const sendCertViaEmail = async (req, res) => {
             continue;
           }
 
+          const value = fieldValues[fieldName];
           if (!value) {
-            console.warn(`Missing value for ${fieldName}`);
+            console.warn(`${logPrefix} Missing value for field: ${fieldName}`);
             continue;
           }
 
-          context.font = `${fontSize}px ${font}`;
-          context.fillStyle = fontColor;
-          context.textAlign = "center";
-          context.fillText(value, (x / 100) * width, (y / 100) * height);
+          sharedContext.font = `${fontSize}px ${font}`;
+          sharedContext.fillStyle = fontColor;
+          sharedContext.textAlign = "center";
+          sharedContext.fillText(value, (x / 100) * width, (y / 100) * height);
         }
 
+        // Generate QR code buffer
+        console.log(`${logPrefix} Generating QR Code buffer...`);
         const qrCodeData = `${
           process.env.DOMAIN || "testDomain/"
         }verify/certificate?id=${cert.id}`;
-        const qrCodeBuffer = await QRCode.toBuffer(qrCodeData, {
-          width: 150,
-          margin: 1,
-        });
+        const qrCodeBuffer = await QRCode.toBuffer(qrCodeData, { width: 150, margin: 1 });
 
+        // Draw QR code on canvas
+        console.log(`${logPrefix} Drawing QR Code on canvas...`);
         const qrCodeImage = await loadImage(qrCodeBuffer);
-        context.drawImage(
+        sharedContext.drawImage(
           qrCodeImage,
           qrX || width - 170,
           qrY || height - 170,
@@ -1514,16 +1587,18 @@ const sendCertViaEmail = async (req, res) => {
           150
         );
 
-        const buffer = canvas.toBuffer("image/png");
+        const buffer = sharedCanvas.toBuffer("image/png");
 
-        attachments = [
+        const attachments = [
           {
             filename: `certificate-${cert.email}.png`,
-            content: Buffer.from(buffer), // Fixing the Nodemailer ESTREAM error
+            content: Buffer.from(buffer),
             encoding: "base64",
           },
         ];
 
+        // Dispatch email
+        console.log(`${logPrefix} Dispatching email via SMTP...`);
         await sendMail(
           cert.email,
           subject || "Your Certificate",
@@ -1532,30 +1607,34 @@ const sendCertViaEmail = async (req, res) => {
           attachments
         );
 
-        await prisma.issuedCertificates.update({
-          where: { id: cert.id },
-          data: { mailed: true },
-        });
-
-        console.log(`Mail sent to ${cert.email}`);
-
-        // Add a delay of 1 minute - timer
-        // await sleep(60000);
+        successfulMailIds.push(cert.id);
+        console.log(`${logPrefix} Email dispatched successfully.`);
       } catch (error) {
-        console.error(`Failed to send mail to ${cert.email}:`, error);
+        console.error(`${logPrefix} FAILED to process or send:`, error.message);
         failedMails.push({ email: cert.email, error: error.message });
       }
     }
 
+    // Single bulk DB update for all successful mails — no N+1 writes
+    if (successfulMailIds.length > 0) {
+      console.log(`[sendCertViaEmail] Bulk update: marking ${successfulMailIds.length} records as mailed=true...`);
+      await prisma.issuedCertificates.updateMany({
+        where: { id: { in: successfulMailIds } },
+        data: { mailed: true },
+      });
+      console.log("[sendCertViaEmail] Bulk update completed.");
+    }
+
     if (failedMails.length > 0) {
+      console.error(`[sendCertViaEmail] ${failedMails.length} emails failed:`, failedMails);
       return res.status(207).json({
-        message: `${certificatesToMail.length - failedMails.length} emails sent successfully. ${failedMails.length} failed.`,
+        message: `${successfulMailIds.length} emails sent successfully. ${failedMails.length} failed.`,
         failed: failedMails,
       });
     }
 
     res.status(200).json({
-      message: `${certificatesToMail.length} emails sent successfully`,
+      message: `${successfulMailIds.length} emails sent successfully`,
     });
   } catch (error) {
     console.error("Error in sendCertViaEmail:", error);
